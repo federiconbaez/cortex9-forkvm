@@ -6,6 +6,7 @@
 //! estado de la vCPU y de la UART.
 
 pub mod boot;
+pub mod guest;
 pub mod layout;
 pub mod mem;
 pub mod uart;
