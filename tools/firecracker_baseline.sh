@@ -26,7 +26,10 @@ KERNEL=vmlinux-6.1.188
 WORK=${WORK:-$(mktemp -d)}
 cd "$WORK"
 
-[ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "no hay /dev/kvm con lectura/escritura" >&2; exit 1; }
+if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+    echo "no hay /dev/kvm con lectura/escritura" >&2
+    exit 1
+fi
 
 curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-x86_64.tgz" | tar -xz
 FC="$WORK/release-$FC_VERSION-x86_64/firecracker-$FC_VERSION-x86_64"
