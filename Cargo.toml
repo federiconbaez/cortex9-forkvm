@@ -12,5 +12,9 @@ kvm-bindings = "0.14.2"
 kvm-ioctls = "0.25.1"
 libc = "0.2"
 
+[[bin]]
+name = "forkvm"
+path = "src/main.rs"
+
 [profile.release]
 debug = false

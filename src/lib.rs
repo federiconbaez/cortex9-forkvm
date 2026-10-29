@@ -5,11 +5,13 @@
 //! nueva que mapea el mismo memfd con MAP_PRIVATE y recibe una copia del
 //! estado de la vCPU y de la UART.
 
+pub mod bench;
 pub mod boot;
 pub mod guest;
 pub mod layout;
 pub mod mem;
 pub mod state;
+pub mod stats;
 pub mod template;
 pub mod uart;
 pub mod vm;
