@@ -1,0 +1,115 @@
+---
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - name: yamllint
+        run: pipx run yamllint -s .github/workflows .yamllint.yml
+      - name: shellcheck
+        run: shellcheck tools/*.sh
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tests sin KVM (unitarios y semántica de memfd/MAP_PRIVATE)
+        run: cargo test --lib --bins --test host
+      - name: Guest emulado en Unicorn (sin KVM) y control negativo
+        run: |
+          python3 -m venv /tmp/uc
+          /tmp/uc/bin/pip install -q unicorn==2.1.4
+          out=$(dirname "$(find target/debug/build -name guest.bin | head -n1)")
+          entry=$(grep -o '0x[0-9a-f]*' "$out/guest_syms.rs")
+          /tmp/uc/bin/python tools/emulate_fork.py "$out/guest.bin" "$entry" --ramas 4
+          /tmp/uc/bin/python tools/emulate_fork.py "$out/guest.bin" "$entry" --control
+
+  kvm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Habilitar /dev/kvm para el usuario del runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Exigir /dev/kvm (falla si no está)
+        run: |
+          ls -l /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+          uname -r
+          grep -m1 'model name' /proc/cpuinfo
+          nproc
+          grep -E 'MemTotal|MemAvailable' /proc/meminfo
+      - name: Pruebas sobre KVM (fallan si no hay KVM)
+        run: cargo test --release --test kvm -- --test-threads=1 --nocapture
+      - name: Plantilla
+        run: cargo run --release -- boot
+      - name: Bench CoW, VM creada dentro del fork
+        run: >-
+          cargo run --release -- bench --mode cow
+          --branches 1,8,64 --rounds 20,5,2 --json cow-cold.json
+      - name: Bench CoW, VMs vacías de un pool
+        run: >-
+          cargo run --release -- bench --mode cow --pool
+          --branches 1,8,64 --rounds 20,5,2 --json cow-pool.json
+      - name: Línea de base, copia completa de la RAM
+        run: >-
+          cargo run --release -- bench --mode copy
+          --branches 1,8 --rounds 10,3 --json copy.json
+      - name: Control negativo, ramas con MAP_SHARED (tiene que detectarse)
+        run: >-
+          cargo run --release -- bench --mode shared
+          --branches 8 --rounds 1 --expect-violation --json shared.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forkvm-bench
+          path: "*.json"
+
+  firecracker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Habilitar /dev/kvm para el usuario del runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Exigir /dev/kvm (falla si no está)
+        run: |
+          ls -l /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+          uname -r
+          grep -m1 'model name' /proc/cpuinfo
+      - name: Dependencias
+        run: sudo apt-get update -q && sudo apt-get install -y -q squashfs-tools
+      - name: Restore de snapshot de Firecracker (256 MiB, backend File)
+        run: N=20 MEM_MIB=256 tools/firecracker_baseline.sh firecracker.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firecracker-baseline
+          path: firecracker.json
