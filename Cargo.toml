@@ -1,0 +1,16 @@
+[package]
+name = "cortex9-forkvm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Fork copy-on-write de microVMs calientes sobre KVM: memoria del guest en un memfd sellado, ramas con mmap MAP_PRIVATE y estado de vCPU copiado."
+repository = "https://github.com/federiconbaez/cortex9-forkvm"
+rust-version = "1.87"
+
+[dependencies]
+kvm-bindings = "0.14.2"
+kvm-ioctls = "0.25.1"
+libc = "0.2"
+
+[profile.release]
+debug = false
