@@ -45,7 +45,7 @@ jobs:
 
   kvm:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -83,33 +83,11 @@ jobs:
         run: >-
           cargo run --release -- bench --mode shared
           --branches 8 --rounds 1 --expect-violation --json shared.json
+      - name: Dependencias de la línea de base
+        run: sudo apt-get update -q && sudo apt-get install -y -q squashfs-tools
+      - name: Línea de base en el mismo runner, restore de snapshot de Firecracker
+        run: N=20 MEM_MIB=256 tools/firecracker_baseline.sh firecracker.json
       - uses: actions/upload-artifact@v4
         with:
           name: forkvm-bench
           path: "*.json"
-
-  firecracker:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Habilitar /dev/kvm para el usuario del runner
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - name: Exigir /dev/kvm (falla si no está)
-        run: |
-          ls -l /dev/kvm
-          test -r /dev/kvm && test -w /dev/kvm
-          uname -r
-          grep -m1 'model name' /proc/cpuinfo
-      - name: Dependencias
-        run: sudo apt-get update -q && sudo apt-get install -y -q squashfs-tools
-      - name: Restore de snapshot de Firecracker (256 MiB, backend File)
-        run: N=20 MEM_MIB=256 tools/firecracker_baseline.sh firecracker.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: firecracker-baseline
-          path: firecracker.json
