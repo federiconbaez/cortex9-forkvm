@@ -62,7 +62,37 @@ cargo run --release -- bench --mode shared --branches 8 --rounds 1 --expect-viol
 N=20 MEM_MIB=256 tools/firecracker_baseline.sh firecracker.json
 ```
 
-**Resultados: pendientes de la primera corrida del CI.** Esta versión del README se escribió antes de que existiera una corrida sobre KVM; los números se agregan con un PR después de esa corrida, con el link al run. No hay ningún número medido en la máquina de desarrollo.
+**Resultados** del job `kvm` en el [run 40812805579](https://github.com/federiconbaez/cortex9-forkvm/actions/runs/40812805579) sobre `main` (`8f307be`): runner `ubuntu-latest` con Intel Xeon Platinum 8573C, 4 vCPU, 16 GiB y kernel 7.0.0-1017-azure (KVM anidado dentro de la VM del runner). Plantilla: arranque → punto de fork 118 ms (incluye llenar 64 MiB), captura 8.5 ms.
+
+Fork → rama lista, por rama (ms):
+
+| N ramas | Rondas / muestras | Cáscara en el fork: p50 | p99 | Cáscara de un pool: p50 | p99 |
+|---|---|---|---|---|---|
+| 1 | 20 / 20 | 0.831 | 1.279 | 0.275 | 0.314 |
+| 8 | 5 / 40 | 0.955 | 1.925 | 0.450 | 1.028 |
+| 64 | 2 / 128 | **10.469** | 15.885 | 1.825 | 9.006 |
+
+Memoria y aislamiento (mismo run):
+
+| | Cáscara en el fork | Pool | Copia completa (`copy`) | Control `shared` |
+|---|---|---|---|---|
+| Memoria anónima por rama, p50 = máx | 1044 KiB (**0.40 %** de 256 MiB) | 1044 KiB (0.40 %) | 262144 KiB (100 %) | 0 KiB (todas escriben en el memfd) |
+| Ramas que pasan la verificación | 188/188 | 188/188 | 34/34 | **0/8** (detectado) |
+| Plantilla intacta después de cada ronda | 27/27 | 27/27 | 13/13 | 0/1 (detectado) |
+| Fork → lista p50, N=1 / N=8 | (arriba) | (arriba) | 147.5 / 366.1 ms | — |
+
+Los 1044 KiB son las 256 páginas que escribe cada rama (1024 KiB) más 5 páginas de pila, mailbox y tablas de páginas del guest (el CPU marca bits A/D). La caída de `MemAvailable` por rama osciló entre 0 y 0.9 MiB y `SecPageTables` (EPT) creció entre 16 y 138 KiB por rama; las dos incluyen memoria del kernel y se publican solo como referencia.
+
+Línea de base de Firecracker en el mismo runner y el mismo job (v1.17.0, guest Linux 6.1.188 con 256 MiB y 1 vCPU, backend `File`, 20 restores): `PUT /snapshot/load` con `resume_vm` p50 **3.159 ms**, p99 4.297 ms; desde lanzar el proceso hasta esa respuesta p50 10.423 ms, p99 15.323 ms. Crear el snapshot completo tardó 1482 ms y el arranque hasta el login 1862 ms.
+
+Veredicto contra el criterio:
+
+- **< 10 ms p50 por rama para 1, 8 y 64 ramas: no se cumple con la VM creada dentro del fork** (10.469 ms con 64 ramas) y **sí con VMs vacías de un pool** (1.825 ms). En la ronda de 64 lo que crece es el primer `KVM_RUN` (4.656 ms p50) y el `mmap` (1.744 ms p50), no `KVM_CREATE_VM` (0.290 ms p50); lo atribuyo a 64 hilos compitiendo por 4 vCPU y por el lock de mapeos del proceso, pero no lo medí por separado.
+- **Memoria por rama < 5 %: se cumple** (0.40 %); la copia completa usa el 100 %.
+- **Aislamiento: se cumple** en las 376 ramas CoW medidas, con la plantilla intacta en todas las rondas, y el control `MAP_SHARED` se detecta en 8 de 8 ramas.
+- **Línea de base de Firecracker: medida**. Su `load` (3.2 ms) es del mismo orden que el fork en frío de forkvm con 1 u 8 ramas (0.8 – 1.0 ms); la diferencia grande está en crear el snapshot (1482 ms escribiendo la RAM a un archivo contra 8.5 ms de sellar el memfd). No es una comparación pareja: Firecracker restaura un Linux completo con dispositivos en un proceso nuevo.
+
+En un segundo runner (AMD EPYC 7763, [run 40812522531](https://github.com/federiconbaez/cortex9-forkvm/actions/runs/40812522531) del PR #1, mismo código) los números fueron parecidos salvo N=64 en frío, peor: p50 16.572 ms (pool: 3.147 ms); Firecracker `load` p50 3.183 ms.
 
 ### Línea de base de Firecracker
 
@@ -70,9 +100,10 @@ N=20 MEM_MIB=256 tools/firecracker_baseline.sh firecracker.json
 
 ### Tests
 
-- `cargo test --lib --bins --test host`: 42 unitarios (layout, modo largo, UART, patrón y checksum del guest, parseo de smaps/meminfo, filtro de MSRs, validación, percentiles) y 5 de memoria en el host sin KVM (`MAP_PRIVATE` es copy-on-write, una plantilla sin sellar se filtra a las páginas no copiadas, el sello bloquea `mmap` compartido, `pwrite` y `ftruncate`, smaps cuenta como anónimas solo las páginas copiadas).
+- `cargo test --lib --bins --test host`: 42 unitarios (layout, modo largo, UART, patrón y checksum del guest, parseo de smaps/meminfo, filtro de MSRs, validación, percentiles) y 6 de memoria en el host sin KVM (`MAP_PRIVATE` es copy-on-write, una plantilla sin sellar se filtra a las páginas no copiadas, el sello bloquea `mmap` compartido, `pwrite` y `ftruncate`, smaps cuenta como anónimas solo las páginas copiadas, dos copias anónimas vecinas se cuentan por separado).
 - `tools/emulate_fork.py`: el guest emulado en Unicorn, plantilla + 4 ramas contra checksums calculados en Python, y un control que altera un qword y tiene que detectarse.
 - `cargo test --release --test kvm -- --test-threads=1`: 8 pruebas sobre KVM real (RIP en `branch_entry` después de `immediate_exit`, marcadores de r15/xmm0/MSR/TSC, 8 ramas CoW aisladas con 64 páginas copiadas cada una más un margen chico, pool, rondas repetidas, copia completa, plantilla sellada que rechaza `MAP_SHARED` y control negativo con `MAP_SHARED`). Fallan si no hay `/dev/kvm`.
+- En el run 40812805579: 42/42, 6/6 y 8/8 (56/56), más las dos corridas del guest emulado.
 
 ### Uso
 
@@ -106,7 +137,7 @@ El VMM base (modo largo, tablas de páginas, UART 16550) viene de un VMM mínimo
 
 **Novelty.** Low. Firecracker already restores snapshots with a `MAP_PRIVATE` mapping of the memory file (same memory mechanism). What differs is narrow: in-process fork from a live template with no memory file, a sealed memfd, and a checksum isolation test with a negative control. Other sandbox products named in the original idea were not reviewed for this README.
 
-**Acceptance criterion** (idea #37): fork → guest ready < 10 ms p50 per branch for 1, 8 and 64 branches; incremental RSS per branch < 5 % of guest RAM (measured as the branch mapping's `Anonymous` in smaps); no branch sees another's writes; a Firecracker snapshot-restore baseline measured on the same host. **Results are pending the first CI run**; they will be added through a PR with the run link. Nothing was measured on the development machine.
+**Acceptance criterion** (idea #37): fork → guest ready < 10 ms p50 per branch for 1, 8 and 64 branches; incremental RSS per branch < 5 % of guest RAM (measured as the branch mapping's `Anonymous` in smaps); no branch sees another's writes; a Firecracker snapshot-restore baseline measured on the same host. Results from [run 40812805579](https://github.com/federiconbaez/cortex9-forkvm/actions/runs/40812805579) on `main` (Intel Xeon Platinum 8573C, 4 vCPU, kernel 7.0.0-1017-azure, nested KVM): fork → ready p50 per branch with the VM created inside the fork 0.831 / 0.955 / **10.469 ms** for 1 / 8 / 64 branches, and with pre-created empty VMs 0.275 / 0.450 / 1.825 ms. Anonymous memory per branch 1044 KiB (0.40 % of 256 MiB) versus 256 MiB for the full-copy baseline (147.5 ms p50 per fork). 376 of 376 CoW branches verified with the template intact; the `MAP_SHARED` control was detected in 8 of 8 branches. Firecracker on the same runner: `PUT /snapshot/load` p50 3.159 ms, process start to loaded p50 10.423 ms, full snapshot creation 1482 ms (forkvm capture: 8.5 ms). Verdict: the < 10 ms p50 target **is not met at 64 branches when the VM is created inside the fork** (CPU contention with 64 threads on 4 vCPUs) and is met with a pool (the growth at 64 is in the first `KVM_RUN` and `mmap`, which I attribute to CPU and mapping-lock contention without having measured it separately); the memory and isolation targets are met. Nothing was measured on the development machine.
 
 **Firecracker baseline.** `tools/firecracker_baseline.sh` uses Firecracker v1.17.0 with the kernel and Ubuntu rootfs from Firecracker's CI, 256 MiB and 1 vCPU, and times `PUT /snapshot/load` (`File` backend, `resume_vm: true`) over 20 fresh processes. It is not an apples-to-apples comparison: full Linux with devices in a new process versus a minimal guest cloned in-process.
 
