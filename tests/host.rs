@@ -114,3 +114,15 @@ fn anonymous_copy_baseline_costs_the_whole_ram() {
     assert_eq!(dst.as_slice()[5 * PAGE], 5);
     assert_eq!(anon_kib(&dst), (PAGES * PAGE / 1024) as u64);
 }
+
+#[test]
+fn neighbouring_anonymous_copies_stay_separate_in_smaps() {
+    // Dos copias anónimas seguidas: cada una tiene que verse con su propio
+    // conteo (sin guardas, el kernel puede fusionar los VMAs).
+    let mut a = Mapping::anonymous(8 * PAGE).unwrap();
+    let mut b = Mapping::anonymous(8 * PAGE).unwrap();
+    a.as_mut_slice().fill(1);
+    b.as_mut_slice()[..3 * PAGE].fill(2);
+    assert_eq!(anon_kib(&a), 8 * (PAGE as u64 / 1024));
+    assert_eq!(anon_kib(&b), 3 * (PAGE as u64 / 1024));
+}

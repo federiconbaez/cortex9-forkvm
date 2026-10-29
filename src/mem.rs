@@ -121,6 +121,8 @@ pub struct Mapping {
     ptr: NonNull<u8>,
     len: usize,
     read_only: bool,
+    /// Región completa a desmapear (incluye páginas de guarda si las hay).
+    unmap: (NonNull<u8>, usize),
 }
 
 // SAFETY: la región es propia; el acceso concurrente lo regulan `&`/`&mut`.
@@ -133,27 +135,52 @@ impl Mapping {
         if p == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
         }
+        let ptr = NonNull::new(p.cast()).expect("mmap devolvió NULL");
         Ok(Self {
-            ptr: NonNull::new(p.cast()).expect("mmap devolvió NULL"),
+            ptr,
             len,
             read_only,
+            unmap: (ptr, len),
         })
     }
 
-    /// Memoria anónima privada de `len` bytes, en cero.
+    /// Memoria anónima privada de `len` bytes, en cero, entre dos páginas de
+    /// guarda sin permisos. Sin las guardas el kernel puede fusionar el VMA
+    /// con otro anónimo vecino y smaps ya no lo muestra por separado.
     pub fn anonymous(len: usize) -> io::Result<Self> {
-        // SAFETY: mapeo anónimo nuevo.
-        let p = unsafe {
+        let total = len + 2 * PAGE;
+        // SAFETY: reserva nueva sin permisos.
+        let base = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
+                total,
+                libc::PROT_NONE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
                 -1,
                 0,
             )
         };
-        Self::from_mmap(p, len, false)
+        if base == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        let base = NonNull::new(base.cast::<u8>()).expect("mmap devolvió NULL");
+        // SAFETY: base + PAGE está dentro de la reserva de `total` bytes.
+        let ptr = unsafe { base.add(PAGE) };
+        // SAFETY: [ptr, ptr+len) está dentro de la reserva.
+        let r =
+            unsafe { libc::mprotect(ptr.as_ptr().cast(), len, libc::PROT_READ | libc::PROT_WRITE) };
+        if r != 0 {
+            let e = io::Error::last_os_error();
+            // SAFETY: desmapea la reserva recién creada.
+            unsafe { libc::munmap(base.as_ptr().cast(), total) };
+            return Err(e);
+        }
+        Ok(Self {
+            ptr,
+            len,
+            read_only: false,
+            unmap: (base, total),
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -184,8 +211,8 @@ impl Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        // SAFETY: ptr/len vienen de mmap.
-        unsafe { libc::munmap(self.ptr.as_ptr().cast(), self.len) };
+        // SAFETY: la región completa viene de mmap.
+        unsafe { libc::munmap(self.unmap.0.as_ptr().cast(), self.unmap.1) };
     }
 }
 
