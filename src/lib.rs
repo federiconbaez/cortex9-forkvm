@@ -9,4 +9,7 @@ pub mod boot;
 pub mod guest;
 pub mod layout;
 pub mod mem;
+pub mod state;
+pub mod template;
 pub mod uart;
+pub mod vm;
